@@ -1,0 +1,166 @@
+
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Servo.h>
+
+#define RST_PIN         5   // MFRC522 RST pin
+#define SS_PIN          4   // MFRC522 SDA pin
+#define OUTPUT_PIN      16
+#define SERVER_IP       "192.168.101.52:3000" // Change to your server IP:PORT
+
+#ifndef STASSID
+#define STASSID "espproject"
+#define STAPSK "vipul123"
+#endif
+
+Servo myservo;
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+bool isLocked = false;
+
+// List of authorized UIDs
+byte authorizedCards[][4] = {
+  {0xCF, 0x03, 0xE5, 0x1F},
+  {0x12, 0x34, 0x56, 0x78}
+};
+int numAuthorized = sizeof(authorizedCards) / sizeof(authorizedCards[0]);
+
+// Helper: Convert UID to String
+String uidToString(byte *uid, byte len) {
+  String uidStr = "";
+  for (byte i = 0; i < len; i++) {
+    if (i > 0) uidStr += ":";
+    if (uid[i] < 0x10) uidStr += "0"; // zero-pad
+    uidStr += String(uid[i], HEX);
+  }
+  return uidStr;
+}
+
+bool isAuthorized(byte *uid) {
+  for (int i = 0; i < numAuthorized; i++) {
+    bool match = true;
+    for (int j = 0; j < 4; j++) {
+      if (authorizedCards[i][j] != uid[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return true;
+  }
+  return false;
+}
+
+// POST UID to server
+void sendUIDToServer(const String& uidStr) {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClient client;
+    HTTPClient http;
+    String url = "http://" SERVER_IP "/api/grant-access/";
+    http.begin(client, url);
+    http.addHeader("Content-Type", "application/json");
+    String payload = "{\"uid\":\"" + uidStr + "\", \"isauth\": true}";
+    int httpCode = http.POST(payload);
+
+    if (httpCode > 0) {
+      Serial.printf("[HTTP] POST... code: %d\n", httpCode);
+      if (httpCode == HTTP_CODE_OK) {
+        Serial.println(http.getString());
+      }
+    } else {
+      Serial.printf("[HTTP] POST... failed, error: %s\n", http.errorToString(httpCode).c_str());
+    }
+    http.end();
+  } else {
+    Serial.println("WiFi not connected, cannot send UID!");
+  }
+}
+
+void sendUIDToServerUnauth(const String& uidStr) {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClient client;
+    HTTPClient http;
+    String url = "http://" SERVER_IP "/api/grant-access/";
+    http.begin(client, url);
+    http.addHeader("Content-Type", "application/json");
+    String payload = "{\"uid\":\"" + uidStr + "\", \"isauth\": false}";
+    int httpCode = http.POST(payload);
+
+    if (httpCode > 0) {
+      Serial.printf("[HTTP] POST... code: %d\n", httpCode);
+      if (httpCode == HTTP_CODE_OK) {
+        Serial.println(http.getString());
+      }
+    } else {
+      Serial.printf("[HTTP] POST... failed, error: %s\n", http.errorToString(httpCode).c_str());
+    }
+    http.end();
+  } else {
+    Serial.println("WiFi not connected, cannot send UID!");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+  Serial.println();
+
+  // WiFi setup
+  WiFi.begin(STASSID, STAPSK);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500); Serial.print(".");
+  }
+  Serial.println("\nWiFi connected. IP: " + WiFi.localIP().toString());
+
+  // RFID setup
+  SPI.begin();
+  mfrc522.PCD_Init();
+  // Only print version ONCE in setup, not in loop!
+  // mfrc522.PCD_DumpVersionToSerial();
+
+  pinMode(OUTPUT_PIN, OUTPUT);
+  myservo.attach(OUTPUT_PIN);
+  myservo.write(0);  // Start unlocked
+  delay(500);
+}
+
+// Use to prevent multiple reads when card is held
+unsigned long lastCardRead = 0;
+const unsigned long cardCooldown = 1500; // ms
+
+void loop() {
+  // Only process if enough time since last read
+  if (millis() - lastCardRead < cardCooldown) return;
+
+  if (!mfrc522.PICC_IsNewCardPresent()) return;
+  if (!mfrc522.PICC_ReadCardSerial()) return;
+
+  String uidStr = uidToString(mfrc522.uid.uidByte, mfrc522.uid.size);
+
+  if (isAuthorized(mfrc522.uid.uidByte)) {
+    Serial.println("Access Granted for UID: " + uidStr);
+
+
+    if(isLocked){
+    sendUIDToServer(uidStr);    // <<< POST only on access granted
+      myservo.write(90);
+      delay(500);
+      Serial.println("Lock locked");
+      isLocked = !isLocked;
+    } else {
+      myservo.write(0);
+      delay(500);
+      Serial.println("Lock unlocked");
+      isLocked = !isLocked;
+    }
+  } else {
+    Serial.println("Access Denied for UID: " + uidStr);
+    // sendUIDToServerUnauth(uidStr);
+    myservo.write(0);
+    delay(500);
+    Serial.println("Lock locked");
+  }
+
+  lastCardRead = millis(); // Set cooldown before next read is allowed
+}
